@@ -1,0 +1,1 @@
+{"led_pin":1,"wifi_ssid":"ssid","wifi_password":"passphrase","mqtt_server":"server","mqtt_port":1883,"mqtt_username":"username","mqtt_password":"password"}
