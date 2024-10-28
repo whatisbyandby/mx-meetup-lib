@@ -21,7 +21,7 @@ cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7.3"
 panic-probe = { version = "0.3.2", features = ["print-defmt"] }
 
-heapless = "0.8.0"
+heapless = {version = "0.8.0"}
 log = "0.4.22"
 embedded-io-async = "0.6.1"
 static_cell = "2.1.0"
@@ -30,7 +30,7 @@ cyw43 = {version = "0.2.0", features = ["defmt", "firmware-logs"]}
 cyw43-pio = {version = "0.2.0", features = ["defmt"]}
 rand = {version = "0.8.5", default-features = false}
 embassy-net-driver-channel = "0.3.0"
-rust-mqtt = { version = "0.3.0", default-features = false }
+rust-mqtt = { version = "0.3.0", default-features = false, features = ["defmt"] }
 
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde-json-core = "0.6.0"
