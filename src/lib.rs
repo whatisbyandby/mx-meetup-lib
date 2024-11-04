@@ -5,11 +5,13 @@ use cyw43::Control;
 use embassy_net::Stack;
 use embassy_net_driver_channel::Device as D;
 use embassy_rp::adc::{Adc, Async, Channel};
-use embassy_rp::peripherals::USB;
+use embassy_rp::flash::{Blocking as FlashBlocking, ERASE_SIZE};
+use embassy_rp::peripherals::{FLASH, USB};
 use embassy_rp::usb::Driver;
 use embassy_usb::class::cdc_acm::Sender;
 use heapless::{String, Vec};
 use serde::{Deserialize, Serialize};
+
 
 use embassy_time::{Duration, Instant, Timer};
 
@@ -26,9 +28,13 @@ use defmt::info;
 use core::fmt::Write;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::Receiver;
+use postcard::{from_bytes, to_vec};
 use static_cell::StaticCell;
 
 pub mod temperature_sensor;
+
+const FLASH_SIZE: usize = 2 * 1024 * 1024;
+const ADDR_OFFSET: u32 = 0x100000;
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Configuration {
@@ -63,7 +69,6 @@ pub enum PicoCommand {
     PrintState,
 }
 
-
 pub struct DemoDeviceBuilder<'a, M>
 where
     M: RawMutex,
@@ -75,7 +80,7 @@ where
     adc: Option<(Adc<'a, Async>, Channel<'a>)>,
     id_string: Option<&'static String<16>>,
     watchdog: Option<embassy_rp::watchdog::Watchdog>,
-    // flash: Option<embassy_rp::flash::Flash>,
+    flash: Option<embassy_rp::flash::Flash<'static, FLASH, FlashBlocking, FLASH_SIZE>>,
 }
 
 impl<'a, M> DemoDeviceBuilder<'a, M>
@@ -91,11 +96,11 @@ where
             adc: None,
             id_string: None,
             watchdog: None,
-            // flash: None,
+            flash: None,
         }
     }
 
-    pub fn with_id(mut self, id: &'static String<16>) -> Self {
+    pub fn with_id(mut self, id: &'static heapless::String<16>) -> Self {
         self.id_string = Some(id);
         self
     }
@@ -118,10 +123,13 @@ where
         self
     }
 
-    // pub fn with_flash(mut self, flash: embassy_rp::flash::Flash) -> Self {
-    //     self.flash = Some(flash);
-    //     self
-    // }
+    pub fn with_flash(
+        mut self,
+        flash: embassy_rp::flash::Flash<'static, FLASH, FlashBlocking, FLASH_SIZE>,
+    ) -> Self {
+        self.flash = Some(flash);
+        self
+    }
 
     pub fn with_control(mut self, control: Control<'a>) -> Self {
         self.control = Some(control);
@@ -152,6 +160,7 @@ where
             temp_readings: Vec::new(),
             last_publish: Instant::now(),
             watchdog: self.watchdog.unwrap(),
+            flash: self.flash.unwrap(),
         }
     }
 }
@@ -180,6 +189,7 @@ where
     temp_readings: Vec<f32, 20>,
     last_publish: Instant,
     watchdog: embassy_rp::watchdog::Watchdog,
+    flash: embassy_rp::flash::Flash<'static, FLASH, FlashBlocking, FLASH_SIZE>,
 }
 
 impl<'a, M> DemoDevice<'a, M>
@@ -199,8 +209,34 @@ where
             Timer::after_millis(1000).await;
         }
 
-        // Wait until the device is configured
-        while self.config.is_none() {
+        // let default_config = Configuration {
+        //     led_pin: 25,
+        //     wifi_ssid: heapless::String::from("PerkyIoT"),
+        //     wifi_password: String::from("M5T$f6FrmACKoY9k"),
+        //     mqtt_server: String::from("192.168.1.88"),
+        //     mqtt_port: 1883,
+        //     mqtt_username: String::from("test"),
+        //     mqtt_password: String::from("test"),
+        // };
+
+
+        // self.write_config(default_config).unwrap();
+
+        match self.read_config() {
+            Ok(_) => {
+                let mut config_string = heapless::String::<256>::new();
+                write!(config_string, "{:?}", self.config).unwrap();
+                info!("Config read successfully");
+                info!("{}", config_string.as_str());
+                Timer::after_millis(5000).await;
+            }
+            Err(_) => {
+                info!("Failed to read default config");
+            }
+        }
+
+         // Wait until the device is configured
+         while self.config.is_none() {
             self.check_for_command().await;
             Timer::after_millis(1000).await;
             self.set_led(true).await;
@@ -208,34 +244,36 @@ where
             self.set_led(false).await;
         }
 
-        self.watchdog.start(Duration::from_millis(5000));
+        // self.watchdog.start(Duration::from_millis(5000));
         self.connect_wifi().await;
         self.watchdog.feed();
         self.connect_mqtt().await;
         self.watchdog.feed();
     }
 
-    // pub fn read_config(&self) -> Result<Configuration, &'static str> {
-    //     let config_string = self.command_receiver.as_ref().unwrap().try_receive();
-    //     match config_string {
-    //         Ok(config) => match config {
-    //             Ok(config) => Ok(config),
-    //             Err(_) => Err("Failed to read config"),
-    //         },
-    //         Err(_) => Err("Failed to read config"),
-    //     }
-    // }
+    pub fn read_config(&mut self) -> Result<(), &'static str> {
+        let mut bytes = [0u8; 256];
+        self.flash
+            .blocking_read(ADDR_OFFSET, &mut bytes)
+            .map_err(|err| "Failed to read config")?;
+        let config: Configuration = from_bytes(&bytes)
+            .map_err(|_| "Failed to deserialize config")
+            .unwrap();
+        self.set_config(config);
+        Ok(())
+    }
 
-    // pub fn write_config(&self, config: Configuration) -> Result<(), &'static str> {
-    //     let config_string = serde_json_core::to_string::<Configuration, 256>(&config)
-    //         .map_err(|_| "Failed to serialize config")?;
-    //     self.usb_sender
-    //         .as_ref()
-    //         .unwrap()
-    //         .write_packet(config_string.as_bytes())
-    //         .unwrap();
-    //     Ok(())
-    // }
+    pub fn write_config(&mut self, config: &Configuration) -> Result<(), &'static str> {
+        let bytes: heapless::Vec<u8, 256> =
+            to_vec(config).map_err(|_| "Failed to serialize config")?;
+        self.flash
+            .blocking_erase(ADDR_OFFSET, ADDR_OFFSET + ERASE_SIZE as u32)
+            .map_err(|_| "Failed to erase flash")?;
+        self.flash
+            .blocking_write(ADDR_OFFSET, &bytes)
+            .map_err(|_| "Failed to write config")?;
+        Ok(())
+    }
 
     pub async fn connect_wifi(&mut self) {
         let ssid = self.config.as_ref().unwrap().wifi_ssid.as_str();
@@ -314,11 +352,10 @@ where
 
         socket.set_timeout(None);
 
-
         let address = Ipv4Address::from_str(self.config.as_ref().unwrap().mqtt_server.as_str())
             .map_err(|_| "Failed to parse IP address")
             .unwrap();
-        
+
         let remote_endpoint = (address, 1883);
         socket.connect(remote_endpoint).await.unwrap();
         self.watchdog.feed();
@@ -493,8 +530,18 @@ where
     }
 
     pub fn get_state_json(&self) -> Result<String<64>, &'static str> {
-        serde_json_core::to_string::<DeviceState, 64>(&self.get_state())
-            .map_err(|_| "Failed to serialize state")
+        let mut heapless_string = String::new();
+        let serde_string = serde_json_core::to_string::<DeviceState, 64>(&self.get_state())
+            .map_err(|_| "Failed to serialize state");
+        match serde_string {
+            Ok(serde_string) => {
+                heapless_string
+                    .push_str(serde_string.as_str())
+                    .map_err(|_| "Failed to serialize state");
+                Ok(heapless_string)
+            }
+            Err(msg) => Err(msg),
+        }
     }
 
     pub async fn execute_command(
@@ -520,6 +567,7 @@ where
                 Ok(message)
             }
             PicoCommand::SetConfig(config) => {
+                self.write_config(&config).map_err(|_| "Failed to set config\n")?;
                 self.set_config(config);
                 let mut message_string = String::new();
                 message_string
@@ -543,15 +591,19 @@ where
                 }
 
                 let current_state = self.get_state();
+                let mut heapless_string = String::new();
                 let state_string = serde_json_core::to_string::<DeviceState, 64>(&current_state)
                     .map_err(|_| "Failed to serialize state\n")?;
-                Ok(state_string)
+                return match heapless_string.push_str(state_string.as_str()) {
+                    Ok(_) => Ok(heapless_string),
+                    Err(_) => Err("Failed to serialize state\n"),
+                };
             }
         };
     }
 }
 
-pub fn parse_command(input: String<256>) -> Result<PicoCommand, &'static str> {
+pub fn parse_command(input: heapless::String<256>) -> Result<PicoCommand, &'static str> {
     let mut iter = input.split_whitespace();
     let command = iter.next().ok_or(()).map_err(|_| "No command found\n")?;
     match command {
