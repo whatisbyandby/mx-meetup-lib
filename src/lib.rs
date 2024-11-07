@@ -6,12 +6,9 @@ use embassy_net::Stack;
 use embassy_net_driver_channel::Device as D;
 use embassy_rp::adc::{Adc, Async, Channel};
 use embassy_rp::flash::{Blocking as FlashBlocking, ERASE_SIZE};
-use embassy_rp::peripherals::{FLASH, USB};
-use embassy_rp::usb::Driver;
-use embassy_usb::class::cdc_acm::Sender;
+use embassy_rp::peripherals::FLASH;
 use heapless::{String, Vec};
 use serde::{Deserialize, Serialize};
-
 
 use embassy_time::{Duration, Instant, Timer};
 
@@ -39,6 +36,7 @@ const ADDR_OFFSET: u32 = 0x100000;
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Configuration {
     pub led_pin: u8,
+    name: String<64>,
     wifi_ssid: String<64>,
     wifi_password: String<64>,
     mqtt_server: String<64>,
@@ -73,7 +71,6 @@ pub struct DemoDeviceBuilder<'a, M>
 where
     M: RawMutex,
 {
-    usb_sender: Option<Sender<'a, Driver<'a, USB>>>,
     command_receiver: Option<Receiver<'a, M, Result<PicoCommand, &'static str>, 5>>,
     stack: Option<&'a Stack<D<'static, 1514>>>,
     control: Option<Control<'a>>,
@@ -89,7 +86,6 @@ where
 {
     pub fn new() -> Self {
         Self {
-            usb_sender: None,
             command_receiver: None,
             stack: None,
             control: None,
@@ -102,11 +98,6 @@ where
 
     pub fn with_id(mut self, id: &'static heapless::String<16>) -> Self {
         self.id_string = Some(id);
-        self
-    }
-
-    pub fn with_usb_sender(mut self, sender: Sender<'a, Driver<'a, USB>>) -> Self {
-        self.usb_sender = Some(sender);
         self
     }
 
@@ -155,7 +146,6 @@ where
             stack: self.stack.unwrap(),
             command_receiver: self.command_receiver.unwrap(),
             id_string: self.id_string.unwrap(),
-            usb_sender: self.usb_sender.unwrap(),
             mqtt_client: None,
             temp_readings: Vec::new(),
             last_publish: Instant::now(),
@@ -183,7 +173,6 @@ where
     control: Control<'a>,
     stack: &'a Stack<D<'static, 1514>>,
     command_receiver: Receiver<'a, M, Result<PicoCommand, &'static str>, 5>,
-    usb_sender: Sender<'a, Driver<'a, USB>>,
     id_string: &'static String<16>,
     mqtt_client: Option<MqttClient<'a, TcpSocket<'a>, 5, CountingRng>>,
     temp_readings: Vec<f32, 20>,
@@ -209,19 +198,6 @@ where
             Timer::after_millis(1000).await;
         }
 
-        // let default_config = Configuration {
-        //     led_pin: 25,
-        //     wifi_ssid: heapless::String::from("PerkyIoT"),
-        //     wifi_password: String::from("M5T$f6FrmACKoY9k"),
-        //     mqtt_server: String::from("192.168.1.88"),
-        //     mqtt_port: 1883,
-        //     mqtt_username: String::from("test"),
-        //     mqtt_password: String::from("test"),
-        // };
-
-
-        // self.write_config(default_config).unwrap();
-
         match self.read_config() {
             Ok(_) => {
                 let mut config_string = heapless::String::<256>::new();
@@ -235,8 +211,8 @@ where
             }
         }
 
-         // Wait until the device is configured
-         while self.config.is_none() {
+        // Wait until the device is configured
+        while self.config.is_none() {
             self.check_for_command().await;
             Timer::after_millis(1000).await;
             self.set_led(true).await;
@@ -244,7 +220,7 @@ where
             self.set_led(false).await;
         }
 
-        // self.watchdog.start(Duration::from_millis(5000));
+        self.watchdog.start(Duration::from_millis(5000));
         self.connect_wifi().await;
         self.watchdog.feed();
         self.connect_mqtt().await;
@@ -256,9 +232,8 @@ where
         self.flash
             .blocking_read(ADDR_OFFSET, &mut bytes)
             .map_err(|err| "Failed to read config")?;
-        let config: Configuration = from_bytes(&bytes)
-            .map_err(|_| "Failed to deserialize config")
-            .unwrap();
+        let config: Configuration =
+            from_bytes(&bytes).map_err(|_| "Failed to deserialize config")?;
         self.set_config(config);
         Ok(())
     }
@@ -283,59 +258,27 @@ where
             match self.control.join_wpa2(ssid, passwd).await {
                 Ok(_) => break,
                 Err(err) => {
-                    self.usb_sender
-                        .write_packet("join failed\n".as_bytes())
-                        .await
-                        .unwrap();
                     info!("join failed with status={}", err.status);
                 }
             }
         }
         self.watchdog.feed();
-
-        // Wait for DHCP, not necessary when using static IP
-        self.usb_sender
-            .write_packet("waiting for DHCP...\n".as_bytes())
-            .await
-            .unwrap();
         info!("waiting for DHCP...");
         while !self.stack.is_config_up() {
             Timer::after_millis(100).await;
         }
         self.watchdog.feed();
-        self.usb_sender
-            .write_packet("DHCP is now up!\n".as_bytes())
-            .await
-            .unwrap();
         info!("DHCP is now up!");
-
-        self.usb_sender
-            .write_packet("waiting for link up...\n".as_bytes())
-            .await
-            .unwrap();
         info!("waiting for link up...");
         while !self.stack.is_link_up() {
             Timer::after_millis(500).await;
         }
         self.watchdog.feed();
         info!("Link is up!");
-        self.usb_sender
-            .write_packet("Link is up!\n".as_bytes())
-            .await
-            .unwrap();
-
         info!("waiting for stack to be up...");
-        self.usb_sender
-            .write_packet("waiting for stack to be up...\n".as_bytes())
-            .await
-            .unwrap();
         self.stack.wait_config_up().await;
         self.watchdog.feed();
         info!("Stack is up!");
-        self.usb_sender
-            .write_packet("Stack is up!\n".as_bytes())
-            .await
-            .unwrap();
     }
 
     pub async fn connect_mqtt(&mut self) {
@@ -364,6 +307,15 @@ where
             rust_mqtt::client::client_config::MqttVersion::MQTTv5,
             CountingRng(20000),
         );
+
+        static PASSWORD : StaticCell<String<64>> = StaticCell::new();
+        static USERNAME : StaticCell<String<64>> = StaticCell::new();
+
+        let static_passwrord = PASSWORD.init(self.config.as_ref().unwrap().mqtt_password.clone());
+        let static_username = USERNAME.init(self.config.as_ref().unwrap().mqtt_username.clone());
+
+        config.add_password(static_passwrord.as_str());
+        config.add_username(static_username.as_str());
 
         config.add_max_subscribe_qos(rust_mqtt::packet::v5::publish_packet::QualityOfService::QoS1);
         let mut client_id = String::<64>::new();
@@ -419,6 +371,22 @@ where
             )
             .await
             .unwrap();
+
+        let mut state_topic = String::<64>::new();
+        state_topic.push_str("device/").unwrap();
+        state_topic.push_str(self.id_string.as_str()).unwrap();
+        state_topic.push_str("/name").unwrap();
+
+        client
+            .send_message(
+                state_topic.as_str(),
+                self.get_config().unwrap().name.as_bytes(),
+                rust_mqtt::packet::v5::publish_packet::QualityOfService::QoS1,
+                true,
+            )
+            .await
+            .unwrap();
+
         self.watchdog.feed();
 
         self.mqtt_client = Some(client);
@@ -432,18 +400,15 @@ where
                     let response = self.execute_command(command).await;
                     match response {
                         Ok(response) => {
-                            self.usb_sender
-                                .write_packet(response.as_bytes())
-                                .await
-                                .unwrap();
+                            
                         }
                         Err(msg) => {
-                            self.usb_sender.write_packet(msg.as_bytes()).await.unwrap();
+                           
                         }
                     }
                 }
                 Err(msg) => {
-                    self.usb_sender.write_packet(msg.as_bytes()).await.unwrap();
+                   
                 }
             },
             Err(_) => {
@@ -461,6 +426,7 @@ where
             if self.last_publish.elapsed() > Duration::from_millis(1000) {
                 self.publish_state().await;
                 self.last_publish = Instant::now();
+                log::info!("Published state");
             }
 
             Timer::after_millis(50).await;
@@ -537,7 +503,7 @@ where
             Ok(serde_string) => {
                 heapless_string
                     .push_str(serde_string.as_str())
-                    .map_err(|_| "Failed to serialize state");
+                    .map_err(|_| "Failed to serialize state")?;
                 Ok(heapless_string)
             }
             Err(msg) => Err(msg),
@@ -567,7 +533,8 @@ where
                 Ok(message)
             }
             PicoCommand::SetConfig(config) => {
-                self.write_config(&config).map_err(|_| "Failed to set config\n")?;
+                self.write_config(&config)
+                    .map_err(|_| "Failed to set config\n")?;
                 self.set_config(config);
                 let mut message_string = String::new();
                 message_string
@@ -604,11 +571,17 @@ where
 }
 
 pub fn parse_command(input: heapless::String<256>) -> Result<PicoCommand, &'static str> {
-    let mut iter = input.split_whitespace();
-    let command = iter.next().ok_or(()).map_err(|_| "No command found\n")?;
+    // Use splitn to split at the first space
+    let mut parts = input.splitn(2, ' ');
+
+    let command = parts
+        .next()
+        .ok_or(())
+        .map_err(|_| "Failed to parse command\n")?;
+
     match command {
         "LED" => {
-            let value = iter
+            let value = parts
                 .next()
                 .ok_or(())
                 .map_err(|_| "LED command requires a parameter of ON or OFF\n")?;
@@ -619,21 +592,21 @@ pub fn parse_command(input: heapless::String<256>) -> Result<PicoCommand, &'stat
             }
         }
         "TEMP" => {
-            let param = iter.next().is_some();
+            let param = parts.next().is_some();
             if param {
                 return Err("TEMP command does not take any parameters\n");
             }
             return Ok(PicoCommand::Temperature);
         }
         "RESET" => {
-            let param = iter.next().is_some();
+            let param = parts.next().is_some();
             if param {
                 return Err("RESET command does not take any parameters\n");
             }
             return Ok(PicoCommand::Reset);
         }
         "CONFIG" => {
-            let config_str = iter
+            let config_str = parts
                 .next()
                 .ok_or(())
                 .map_err(|_| "CONFIG requires a Json parameter\n")?;
@@ -645,7 +618,7 @@ pub fn parse_command(input: heapless::String<256>) -> Result<PicoCommand, &'stat
             return Ok(PicoCommand::SetConfig(config));
         }
         "PRINT" => {
-            let param = iter.next().is_some();
+            let param = parts.next().is_some();
             if param {
                 return Err("PRINT command does not take any parameters\n");
             }
@@ -675,13 +648,14 @@ mod tests {
     #[test]
     fn test_parse_config() {
         let mut input = String::new();
-        input.push_str(r#"CONFIG {"led_pin":1,"wifi_ssid":"ssid","wifi_password":"password","mqtt_server":"server","mqtt_port":1883,"mqtt_username":"username","mqtt_password":"password"}"#).unwrap();
-        let _command = parse_command(input).unwrap();
+        input.push_str(r#"CONFIG {"wifi_ssid":"PerkyIoT","wifi_password":"M5T$f6FrmACKoY9k","mqtt_server":"192.168.1.88","mqtt_username":"Test","mqtt_password":"Test","mqtt_port":1883,"led_pin":1,"name":"Test Name"}"#).unwrap();
+        let command = parse_command(input).unwrap();
+        assert!(matches!(command, PicoCommand::SetConfig(_)));
     }
 
     #[test]
     fn test_deserialize_config() {
-        let test_config = r#"{"led_pin":1,"wifi_ssid":"ssid","wifi_password":"password","mqtt_server":"server","mqtt_port":1883,"mqtt_username":"username","mqtt_password":"password"}"#;
+        let test_config = r#"{"wifi_ssid":"ssid","wifi_password":"password","mqtt_server":"server","mqtt_username":"username","mqtt_password":"password","mqtt_port":1883,"led_pin":1,"name":"Test Device"}"#;
 
         let mut input = String::new();
         input.push_str(test_config).unwrap();
@@ -694,5 +668,6 @@ mod tests {
         assert_eq!(config.mqtt_port, 1883);
         assert_eq!(config.mqtt_username, "username");
         assert_eq!(config.mqtt_password, "password");
+        assert_eq!(config.name, "Test Device");
     }
 }
