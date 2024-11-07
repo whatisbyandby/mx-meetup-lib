@@ -52,7 +52,6 @@ pub struct DeviceState {
 }
 
 pub fn deserialize_config(input: &String<256>) -> Result<Configuration, &'static str> {
-    info!("Deserializing: {:?}", input.as_str());
     let (data, _remainder) =
         serde_json_core::from_str::<Configuration>(&input).map_err(|_| "Unable to parse Json\n")?;
     Ok(data)
@@ -202,17 +201,17 @@ where
             Ok(_) => {
                 let mut config_string = heapless::String::<256>::new();
                 write!(config_string, "{:?}", self.config).unwrap();
-                info!("Config read successfully");
-                info!("{}", config_string.as_str());
+                log::info!("Config read successfully");
                 Timer::after_millis(5000).await;
             }
             Err(_) => {
-                info!("Failed to read default config");
+                log::error!("Failed to read default config");
             }
         }
 
         // Wait until the device is configured
         while self.config.is_none() {
+            log::info!("Waiting for config");
             self.check_for_command().await;
             Timer::after_millis(1000).await;
             self.set_led(true).await;
@@ -220,11 +219,9 @@ where
             self.set_led(false).await;
         }
 
-        self.watchdog.start(Duration::from_millis(5000));
         self.connect_wifi().await;
-        self.watchdog.feed();
         self.connect_mqtt().await;
-        self.watchdog.feed();
+        self.watchdog.start(Duration::from_millis(5000));
     }
 
     pub fn read_config(&mut self) -> Result<(), &'static str> {
@@ -258,27 +255,27 @@ where
             match self.control.join_wpa2(ssid, passwd).await {
                 Ok(_) => break,
                 Err(err) => {
-                    info!("join failed with status={}", err.status);
+                    log::info!("join failed with status={}", err.status);
                 }
             }
         }
         self.watchdog.feed();
-        info!("waiting for DHCP...");
+        log::info!("waiting for DHCP...");
         while !self.stack.is_config_up() {
             Timer::after_millis(100).await;
         }
         self.watchdog.feed();
-        info!("DHCP is now up!");
-        info!("waiting for link up...");
+        log::info!("DHCP is now up!");
+        log::info!("waiting for link up...");
         while !self.stack.is_link_up() {
             Timer::after_millis(500).await;
         }
         self.watchdog.feed();
-        info!("Link is up!");
-        info!("waiting for stack to be up...");
+        log::info!("Link is up!");
+        log::info!("waiting for stack to be up...");
         self.stack.wait_config_up().await;
         self.watchdog.feed();
-        info!("Stack is up!");
+        log::info!("Stack is up!");
     }
 
     pub async fn connect_mqtt(&mut self) {
@@ -353,7 +350,7 @@ where
         );
 
         match client.connect_to_broker().await {
-            Ok(()) => info!("MQTT Connected"),
+            Ok(()) => log::info!("MQTT Connected"),
             Err(mqtt_error) => match mqtt_error {
                 ReasonCode::NetworkError => info!("MQTT Network Error"),
                 ReasonCode::Success => info!("Success"),
@@ -400,15 +397,15 @@ where
                     let response = self.execute_command(command).await;
                     match response {
                         Ok(response) => {
-                            
+                            log::info!("{}", response);
                         }
                         Err(msg) => {
-                           
+                           log::error!("{}", msg);
                         }
                     }
                 }
                 Err(msg) => {
-                   
+                   log::error!("{}", msg);
                 }
             },
             Err(_) => {
@@ -426,7 +423,7 @@ where
             if self.last_publish.elapsed() > Duration::from_millis(1000) {
                 self.publish_state().await;
                 self.last_publish = Instant::now();
-                log::info!("Published state");
+                log::debug!("Published state");
             }
 
             Timer::after_millis(50).await;
@@ -518,9 +515,8 @@ where
             PicoCommand::Led(value) => {
                 self.set_led(value).await;
                 let mut message_string = String::new();
-                message_string
-                    .push_str("LED set\n")
-                    .map_err(|_| "Failed to set LED\n")?;
+                write!(message_string, "LED set to {}", value)
+                    .map_err(|_| "Failed to set LED")?;
                 self.publish_state().await;
                 Ok(message_string)
             }
@@ -528,42 +524,42 @@ where
                 self.watchdog.trigger_reset();
                 let mut message: String<64> = String::new();
                 message
-                    .push_str("Resetting\n")
-                    .map_err(|_| "Failed to reset\n")?;
+                    .push_str("Resetting")
+                    .map_err(|_| "Failed to reset")?;
                 Ok(message)
             }
             PicoCommand::SetConfig(config) => {
                 self.write_config(&config)
-                    .map_err(|_| "Failed to set config\n")?;
+                    .map_err(|_| "Failed to set config")?;
                 self.set_config(config);
                 let mut message_string = String::new();
                 message_string
-                    .push_str("Config set\n")
-                    .map_err(|_| "Failed to set config\n")?;
+                    .push_str("Config set")
+                    .map_err(|_| "Failed to set config")?;
                 Ok(message_string)
             }
             PicoCommand::Temperature => {
                 let temp_c = self.read_temperature().await;
                 let mut message_string = String::new();
                 write!(message_string, "{:.2}", temp_c)
-                    .map_err(|_| "Failed to read temperature\n")?;
+                    .map_err(|_| "Failed to read temperature")?;
                 message_string
                     .push_str("° C\n")
-                    .map_err(|_| "Failed to read temperature\n")?;
+                    .map_err(|_| "Failed to read temperature")?;
                 Ok(message_string)
             }
             PicoCommand::PrintState => {
                 if self.config.is_none() {
-                    return Err("Config not set\n");
+                    return Err("Config not set");
                 }
 
                 let current_state = self.get_state();
                 let mut heapless_string = String::new();
                 let state_string = serde_json_core::to_string::<DeviceState, 64>(&current_state)
-                    .map_err(|_| "Failed to serialize state\n")?;
+                    .map_err(|_| "Failed to serialize state")?;
                 return match heapless_string.push_str(state_string.as_str()) {
                     Ok(_) => Ok(heapless_string),
-                    Err(_) => Err("Failed to serialize state\n"),
+                    Err(_) => Err("Failed to serialize state"),
                 };
             }
         };
@@ -584,7 +580,7 @@ pub fn parse_command(input: heapless::String<256>) -> Result<PicoCommand, &'stat
             let value = parts
                 .next()
                 .ok_or(())
-                .map_err(|_| "LED command requires a parameter of ON or OFF\n")?;
+                .map_err(|_| "LED command requires a parameter of ON or OFF")?;
             match value {
                 "ON" => return Ok(PicoCommand::Led(true)),
                 "OFF" => return Ok(PicoCommand::Led(false)),
@@ -594,14 +590,14 @@ pub fn parse_command(input: heapless::String<256>) -> Result<PicoCommand, &'stat
         "TEMP" => {
             let param = parts.next().is_some();
             if param {
-                return Err("TEMP command does not take any parameters\n");
+                return Err("TEMP command does not take any parameters");
             }
             return Ok(PicoCommand::Temperature);
         }
         "RESET" => {
             let param = parts.next().is_some();
             if param {
-                return Err("RESET command does not take any parameters\n");
+                return Err("RESET command does not take any parameters");
             }
             return Ok(PicoCommand::Reset);
         }
@@ -609,22 +605,22 @@ pub fn parse_command(input: heapless::String<256>) -> Result<PicoCommand, &'stat
             let config_str = parts
                 .next()
                 .ok_or(())
-                .map_err(|_| "CONFIG requires a Json parameter\n")?;
+                .map_err(|_| "CONFIG requires a Json parameter")?;
             let mut config_string = String::new();
             config_string
                 .push_str(config_str)
-                .map_err(|_| "Failed to parse JSON\n")?;
+                .map_err(|_| "Failed to parse JSON")?;
             let config = deserialize_config(&config_string).map_err(|msg| msg)?;
             return Ok(PicoCommand::SetConfig(config));
         }
         "PRINT" => {
             let param = parts.next().is_some();
             if param {
-                return Err("PRINT command does not take any parameters\n");
+                return Err("PRINT command does not take any parameters");
             }
             return Ok(PicoCommand::PrintState);
         }
-        _ => return Err("Unknown command\n"),
+        _ => return Err("Unknown command"),
     }
 }
 
