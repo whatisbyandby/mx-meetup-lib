@@ -53,7 +53,7 @@ pub struct DeviceState {
 
 pub fn deserialize_config(input: &String<256>) -> Result<Configuration, &'static str> {
     let (data, _remainder) =
-        serde_json_core::from_str::<Configuration>(&input).map_err(|_| "Unable to parse Json\n")?;
+        serde_json_core::from_str::<Configuration>(&input).map_err(|_| "Unable to parse Json")?;
     Ok(data)
 }
 
@@ -259,22 +259,19 @@ where
                 }
             }
         }
-        self.watchdog.feed();
         log::info!("waiting for DHCP...");
         while !self.stack.is_config_up() {
             Timer::after_millis(100).await;
         }
-        self.watchdog.feed();
         log::info!("DHCP is now up!");
         log::info!("waiting for link up...");
         while !self.stack.is_link_up() {
             Timer::after_millis(500).await;
         }
-        self.watchdog.feed();
         log::info!("Link is up!");
         log::info!("waiting for stack to be up...");
         self.stack.wait_config_up().await;
-        self.watchdog.feed();
+
         log::info!("Stack is up!");
     }
 
@@ -544,7 +541,7 @@ where
                 write!(message_string, "{:.2}", temp_c)
                     .map_err(|_| "Failed to read temperature")?;
                 message_string
-                    .push_str("° C\n")
+                    .push_str("° C")
                     .map_err(|_| "Failed to read temperature")?;
                 Ok(message_string)
             }
@@ -573,7 +570,7 @@ pub fn parse_command(input: heapless::String<256>) -> Result<PicoCommand, &'stat
     let command = parts
         .next()
         .ok_or(())
-        .map_err(|_| "Failed to parse command\n")?;
+        .map_err(|_| "Failed to parse command")?;
 
     match command {
         "LED" => {
@@ -584,7 +581,7 @@ pub fn parse_command(input: heapless::String<256>) -> Result<PicoCommand, &'stat
             match value {
                 "ON" => return Ok(PicoCommand::Led(true)),
                 "OFF" => return Ok(PicoCommand::Led(false)),
-                _ => return Err("Invalid value for LED\n"),
+                _ => return Err("Invalid value for LED"),
             }
         }
         "TEMP" => {
