@@ -7,7 +7,7 @@ use embassy_net_driver_channel::Device as D;
 use embassy_rp::adc::{Adc, Async, Channel};
 use embassy_rp::flash::{Blocking as FlashBlocking, ERASE_SIZE};
 use embassy_rp::peripherals::FLASH;
-use heapless::{String, Vec};
+use heapless::String;
 use serde::{Deserialize, Serialize};
 
 use embassy_time::{Duration, Instant, Timer};
@@ -58,8 +58,15 @@ pub fn deserialize_config(input: &String<256>) -> Result<Configuration, &'static
 }
 
 #[derive(Debug, PartialEq)]
+pub enum LedCommandParameter {
+    On,
+    Off,
+    Toggle,
+}
+
+#[derive(Debug, PartialEq)]
 pub enum PicoCommand {
-    Led(bool),
+    Led(LedCommandParameter),
     SetConfig(Configuration),
     Temperature,
     Reset,
@@ -146,7 +153,6 @@ where
             command_receiver: self.command_receiver.unwrap(),
             id_string: self.id_string.unwrap(),
             mqtt_client: None,
-            temp_readings: Vec::new(),
             last_publish: Instant::now(),
             watchdog: self.watchdog.unwrap(),
             flash: self.flash.unwrap(),
@@ -174,7 +180,6 @@ where
     command_receiver: Receiver<'a, M, Result<PicoCommand, &'static str>, 5>,
     id_string: &'static String<16>,
     mqtt_client: Option<MqttClient<'a, TcpSocket<'a>, 5, CountingRng>>,
-    temp_readings: Vec<f32, 20>,
     last_publish: Instant,
     watchdog: embassy_rp::watchdog::Watchdog,
     flash: embassy_rp::flash::Flash<'static, FLASH, FlashBlocking, FLASH_SIZE>,
@@ -191,9 +196,9 @@ where
 
         // Blink the LED to indicate the device is starting up
         for _ in 0..2 {
-            self.set_led(true).await;
+            self.set_led(LedCommandParameter::On).await;
             Timer::after_millis(1000).await;
-            self.set_led(false).await;
+            self.set_led(LedCommandParameter::Off).await;
             Timer::after_millis(1000).await;
         }
 
@@ -214,9 +219,9 @@ where
             log::info!("Waiting for config");
             self.check_for_command().await;
             Timer::after_millis(1000).await;
-            self.set_led(true).await;
+            self.set_led(LedCommandParameter::On).await;
             Timer::after_millis(100).await;
-            self.set_led(false).await;
+            self.set_led(LedCommandParameter::Off).await;
         }
 
         self.connect_wifi().await;
@@ -356,6 +361,10 @@ where
         }
         self.watchdog.feed();
 
+        let mut subscribe_topic = String::<64>::new();
+        write!(subscribe_topic, "device/{}/command", self.id_string).unwrap();
+        client.subscribe_to_topic(subscribe_topic.as_str()).await.unwrap();
+
         client
             .send_message(
                 static_will_topic.as_str(),
@@ -412,26 +421,21 @@ where
     }
 
     pub async fn run(&mut self) {
-        loop {
             self.watchdog.feed();
             self.check_for_command().await;
-            self.read_temperature().await;
 
             if self.last_publish.elapsed() > Duration::from_millis(1000) {
                 self.publish_state().await;
                 self.last_publish = Instant::now();
                 log::debug!("Published state");
             }
-
-            Timer::after_millis(50).await;
-        }
     }
 
     pub async fn publish_state(&mut self) {
         if self.mqtt_client.is_none() {
             return;
         }
-        let json_state = self.get_state_json().unwrap();
+        let json_state = self.get_state_json().await.unwrap();
 
         let mut state_topic = String::<64>::new();
         state_topic.push_str("device/").unwrap();
@@ -462,36 +466,36 @@ where
     pub async fn read_temperature(&mut self) -> f32 {
         let raw_reading = self.adc.0.read(&mut self.adc.1).await.unwrap();
         let temp_c = convert_to_celsius(raw_reading);
-        if self.temp_readings.len() == 20 {
-            self.temp_readings.pop().unwrap();
-        }
-        self.temp_readings.push(temp_c).unwrap();
         temp_c
     }
 
-    pub fn get_avg_temperature(&self) -> f32 {
-        let mut sum = 0.0;
-        for temp in self.temp_readings.iter() {
-            sum += temp;
+    pub async fn set_led(&mut self, value: LedCommandParameter) {
+
+        match value {
+            LedCommandParameter::On => {
+                self.current_led_state = true;
+            }
+            LedCommandParameter::Off => {
+                self.current_led_state = false;
+            }
+            LedCommandParameter::Toggle => {
+                self.current_led_state = !self.current_led_state;
+            }
         }
-        sum / self.temp_readings.len() as f32
+
+        self.control.gpio_set(0, self.current_led_state).await;
     }
 
-    pub async fn set_led(&mut self, value: bool) {
-        self.current_led_state = value;
-        self.control.gpio_set(0, value).await;
-    }
-
-    pub fn get_state(&self) -> DeviceState {
+    pub async fn get_state(&mut self) -> DeviceState {
         DeviceState {
-            temperature: self.get_avg_temperature(),
+            temperature: self.read_temperature().await,
             led_state: self.current_led_state,
         }
     }
 
-    pub fn get_state_json(&self) -> Result<String<64>, &'static str> {
+    pub async fn get_state_json(&mut self) -> Result<String<64>, &'static str> {
         let mut heapless_string = String::new();
-        let serde_string = serde_json_core::to_string::<DeviceState, 64>(&self.get_state())
+        let serde_string = serde_json_core::to_string::<DeviceState, 64>(&self.get_state().await)
             .map_err(|_| "Failed to serialize state");
         match serde_string {
             Ok(serde_string) => {
@@ -512,7 +516,7 @@ where
             PicoCommand::Led(value) => {
                 self.set_led(value).await;
                 let mut message_string = String::new();
-                write!(message_string, "LED set to {}", value)
+                write!(message_string, "LED set to {:?}", self.current_led_state)
                     .map_err(|_| "Failed to set LED")?;
                 self.publish_state().await;
                 Ok(message_string)
@@ -550,7 +554,7 @@ where
                     return Err("Config not set");
                 }
 
-                let current_state = self.get_state();
+                let current_state = self.get_state().await;
                 let mut heapless_string = String::new();
                 let state_string = serde_json_core::to_string::<DeviceState, 64>(&current_state)
                     .map_err(|_| "Failed to serialize state")?;
@@ -579,8 +583,9 @@ pub fn parse_command(input: heapless::String<256>) -> Result<PicoCommand, &'stat
                 .ok_or(())
                 .map_err(|_| "LED command requires a parameter of ON or OFF")?;
             match value {
-                "ON" => return Ok(PicoCommand::Led(true)),
-                "OFF" => return Ok(PicoCommand::Led(false)),
+                "ON" => return Ok(PicoCommand::Led(LedCommandParameter::On)),
+                "OFF" => return Ok(PicoCommand::Led(LedCommandParameter::Off)),
+                "TOGGLE" => return Ok(PicoCommand::Led(LedCommandParameter::Toggle)),
                 _ => return Err("Invalid value for LED"),
             }
         }
@@ -630,12 +635,12 @@ mod tests {
         let mut input = String::new();
         input.push_str("LED ON").unwrap();
         let command = parse_command(input).unwrap();
-        assert_eq!(command, PicoCommand::Led(true));
+        assert_eq!(command, PicoCommand::Led(LedCommandParameter::On));
 
         let mut input = String::new();
         input.push_str("LED OFF").unwrap();
         let command = parse_command(input).unwrap();
-        assert_eq!(command, PicoCommand::Led(false));
+        assert_eq!(command, PicoCommand::Led(LedCommandParameter::Off));
     }
 
     #[test]
